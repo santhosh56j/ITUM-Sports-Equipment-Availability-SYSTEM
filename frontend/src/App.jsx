@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 const INITIAL_CATALOG = [
   { id: 1, name: 'Basketball', category: 'Indoor', rating: 4.9, available: 6, code: 'BB · 07', desc: 'Size 7 · Indoor / outdoor · Ready to play', img: '🏀' },
