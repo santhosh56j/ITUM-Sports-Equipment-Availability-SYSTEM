@@ -1,12 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import {
   Search, SlidersHorizontal, Heart, Eye, EyeOff, ArrowRight, ArrowLeft,
   Calendar, MapPin, Check, QrCode, User, Bell, Moon
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 const INITIAL_CATALOG = [
   { id: 1, name: 'Basketball', category: 'Indoor', rating: 4.9, available: 6, code: 'BB · 07', desc: 'Size 7 · Indoor / outdoor · Ready to play', img: '🏀' },
@@ -57,10 +54,14 @@ export default function App() {
       throw new Error('Your profile is missing a student ID.');
     }
 
-    const { data } = await axios.get(API_URL + '/bookings');
-    const formatted = data
-      .filter(b => b.student_id === currentStudentId)
-      .map(b => ({
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('*, equipment(name)')
+      .eq('student_id', currentStudentId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    const formatted = (data || []).map(b => ({
         dbId: b.id,
         id: b.pass_code,
         equipmentId: b.equipment_id,
@@ -94,10 +95,16 @@ export default function App() {
   };
 
   useEffect(() => {
-    axios.get(API_URL + '/equipment')
-      .then(res => {
-        if (res.data && res.data.length > 0) {
-          const merged = res.data.map((item, idx) => ({
+    const loadEquipment = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('equipment')
+          .select('*')
+          .order('id', { ascending: true });
+        if (error) throw error;
+
+        if (data && data.length > 0) {
+          const merged = data.map((item, idx) => ({
             ...INITIAL_CATALOG[idx % INITIAL_CATALOG.length],
             id: item.id,
             name: item.name,
@@ -105,8 +112,13 @@ export default function App() {
           }));
           setEquipment(merged);
         }
-      })
-      .catch(() => console.log('Running in local mode'));
+      } catch (err) {
+        console.error('Failed to load equipment:', err);
+        setAuthError(err.message || 'Unable to load equipment.');
+      }
+    };
+
+    loadEquipment();
 
     const initAuth = async () => {
       try {
@@ -226,11 +238,10 @@ export default function App() {
   const handleConfirmReservation = async () => {
     setAuthError('');
     setBookingLoading(true);
-    const codeNum = Math.floor(10 + Math.random() * 89);
+    const passCode = 'ITUM-' + Math.floor(100000 + Math.random() * 900000);
     const newPass = {
       dbId: null,
-      id: 'ITUM-261023-0' + codeNum,
-      shortCode: '0' + codeNum + ' – 23',
+      id: passCode,
       equipmentId: selectedItem.id,
       equipmentName: selectedItem.name,
       img: selectedItem.img,
@@ -241,20 +252,28 @@ export default function App() {
     };
 
     try {
-      const response = await axios.post(API_URL + '/bookings', {
-        studentId: user.studentId || 'GUEST',
-        studentName: user.fullName || 'ITUM Student',
-        equipmentId: selectedItem.id,
-        quantity,
-        date: selectedDate,
-        timeSlot: selectedSlot
-      });
-      if (response.data) {
-        newPass.dbId = response.data.id;
-        if (response.data.pass_code) {
-          newPass.id = response.data.pass_code;
-        }
-      }
+      const { data: booking, error: bookingError } = await supabase
+        .from('bookings')
+        .insert({
+          pass_code: passCode,
+          student_id: user.studentId || 'GUEST',
+          student_name: user.fullName || 'ITUM Student',
+          equipment_id: selectedItem.id,
+          quantity,
+          booking_date: selectedDate,
+          time_slot: selectedSlot
+        })
+        .select()
+        .single();
+      if (bookingError) throw bookingError;
+
+      const { error: equipmentError } = await supabase
+        .from('equipment')
+        .update({ available: Math.max(0, selectedItem.available - quantity) })
+        .eq('id', selectedItem.id);
+      if (equipmentError) throw equipmentError;
+
+      newPass.dbId = booking.id;
       setEquipment(prev =>
         prev.map(eq => eq.id === selectedItem.id ? { ...eq, available: Math.max(0, eq.available - quantity) } : eq)
       );
@@ -263,7 +282,7 @@ export default function App() {
       setPage('complete');
     } catch (err) {
       console.error('Booking failed:', err);
-      setAuthError(err.response?.data?.error || err.message || 'Unable to reserve this equipment.');
+      setAuthError(err.message || 'Unable to reserve this equipment.');
     } finally {
       setBookingLoading(false);
     }
@@ -273,9 +292,24 @@ export default function App() {
     setAuthError('');
     try {
       if (resItem.dbId) {
-        await axios.patch(API_URL + '/bookings/' + resItem.dbId, {
-          status: 'Cancelled'
-        });
+        const { error: bookingError } = await supabase
+          .from('bookings')
+          .update({ status: 'Cancelled' })
+          .eq('id', resItem.dbId);
+        if (bookingError) throw bookingError;
+
+        const { data: item, error: fetchError } = await supabase
+          .from('equipment')
+          .select('available')
+          .eq('id', resItem.equipmentId)
+          .single();
+        if (fetchError) throw fetchError;
+
+        const { error: equipmentError } = await supabase
+          .from('equipment')
+          .update({ available: item.available + resItem.quantity })
+          .eq('id', resItem.equipmentId);
+        if (equipmentError) throw equipmentError;
       }
 
       setReservations(prev =>
@@ -291,7 +325,7 @@ export default function App() {
       );
     } catch (err) {
       console.error('Failed to cancel reservation:', err);
-      setAuthError(err.response?.data?.error || err.message || 'Failed to cancel the reservation.');
+      setAuthError(err.message || 'Failed to cancel the reservation.');
     }
   };
   const renderNavbar = () => (
