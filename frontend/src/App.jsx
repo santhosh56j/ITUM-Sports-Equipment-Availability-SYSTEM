@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
+const ITUM_EMAIL_DOMAIN = '@itum.mrt.ac.lk';
+
 const INITIAL_CATALOG = [
   { id: 1, name: 'Basketball', category: 'Indoor', rating: 4.9, available: 6, code: 'BB · 07', desc: 'Size 7 · Indoor / outdoor · Ready to play', img: '🏀' },
   { id: 2, name: 'Netball', category: 'Outdoor', rating: 4.9, available: 5, code: 'NB · 02', desc: 'Size 5 · Match grade · Ready to play', img: '🏐' },
@@ -23,6 +25,8 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authUserId, setAuthUserId] = useState(null);
+  const [confirmationEmail, setConfirmationEmail] = useState('');
+  const [confirmationMessage, setConfirmationMessage] = useState('');
   const [bookingLoading, setBookingLoading] = useState(false);
 
   const [user, setUser] = useState({
@@ -74,14 +78,40 @@ export default function App() {
     setReservations(formatted);
   };
 
-  const loadProfileAndBookings = async (userId, fallbackEmail) => {
-    const { data: profile, error } = await supabase
+  const loadProfileAndBookings = async (userId, fallbackEmail, userMetadata = {}) => {
+    let { data: profile, error } = await supabase
       .from('profiles')
       .select('id, full_name, student_id, field, phone, email')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+
+    if (!profile) {
+      const emailStudentId = fallbackEmail?.toLowerCase().endsWith(ITUM_EMAIL_DOMAIN)
+        ? fallbackEmail.slice(0, -ITUM_EMAIL_DOMAIN.length)
+        : '';
+      const studentId = userMetadata.student_id || emailStudentId;
+      if (!studentId) {
+        throw new Error('Your student profile could not be created. Please contact support.');
+      }
+
+      const { data: createdProfile, error: createError } = await supabase
+        .from('profiles')
+        .insert({
+          id: userId,
+          full_name: userMetadata.full_name || '',
+          student_id: studentId,
+          field: userMetadata.field || 'Information Technology',
+          phone: userMetadata.phone || '',
+          email: fallbackEmail || ''
+        })
+        .select('id, full_name, student_id, field, phone, email')
+        .single();
+
+      if (createError) throw createError;
+      profile = createdProfile;
+    }
 
     setUser({
       fullName: profile.full_name || '',
@@ -127,7 +157,7 @@ export default function App() {
 
         if (session?.user) {
           setAuthUserId(session.user.id);
-          await loadProfileAndBookings(session.user.id, session.user.email);
+          await loadProfileAndBookings(session.user.id, session.user.email, session.user.user_metadata);
           setPage('equipment');
         }
       } catch (err) {
@@ -146,32 +176,47 @@ export default function App() {
 
     try {
       if (page === 'signup') {
+        const studentId = user.studentId.trim();
+        const email = user.email.trim().toLowerCase();
         if (password !== confirmPassword) {
           setAuthError('Passwords do not match.');
           return;
         }
 
+        if (email !== `${studentId.toLowerCase()}${ITUM_EMAIL_DOMAIN}`) {
+          setAuthError(`Use your student email in this format: ${studentId || 'studentid'}${ITUM_EMAIL_DOMAIN}`);
+          return;
+        }
+
         const { data, error } = await supabase.auth.signUp({
-          email: user.email,
-          password
+          email,
+          password,
+          options: {
+            emailRedirectTo: window.location.origin,
+            data: {
+              full_name: user.fullName.trim(),
+              student_id: studentId,
+              field: user.field,
+              phone: user.phone
+            }
+          }
         });
         if (error) throw error;
         if (!data.user) throw new Error('Unable to create your account.');
 
-        const { error: profileError } = await supabase.from('profiles').insert({
-          id: data.user.id,
-          full_name: user.fullName,
-          student_id: user.studentId,
-          field: user.field,
-          phone: user.phone,
-          email: user.email
-        });
-        if (profileError) throw profileError;
+        if (data.user.identities?.length === 0) {
+          throw new Error('Unable to register with this email. If you already registered, try signing in.');
+        }
 
-        setAuthUserId(data.user.id);
-        setUser(prev => ({ ...prev, nickName: user.studentId.toLowerCase() }));
-        await loadStudentBookings(user.studentId);
-        setPage('equipment');
+        if (data.session) {
+          const { error: signOutError } = await supabase.auth.signOut();
+          if (signOutError) throw signOutError;
+          throw new Error('Email confirmation is disabled. Enable it in Supabase Authentication settings to require verification and send confirmation emails.');
+        }
+
+        setConfirmationEmail(email);
+        setConfirmationMessage('');
+        setPage('confirm-email');
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
           email: user.email,
@@ -181,12 +226,32 @@ export default function App() {
         if (!data.user) throw new Error('Unable to sign in.');
 
         setAuthUserId(data.user.id);
-        await loadProfileAndBookings(data.user.id, data.user.email);
+        await loadProfileAndBookings(data.user.id, data.user.email, data.user.user_metadata);
         setPage('equipment');
       }
     } catch (err) {
       console.error('Authentication failed:', err);
       setAuthError(err.message || 'Authentication failed. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    setAuthError('');
+    setConfirmationMessage('');
+    setAuthLoading(true);
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: confirmationEmail,
+        options: { emailRedirectTo: window.location.origin }
+      });
+      if (error) throw error;
+      setConfirmationMessage('A new confirmation email has been sent.');
+    } catch (err) {
+      console.error('Failed to resend confirmation email:', err);
+      setAuthError(err.message || 'Unable to resend the confirmation email.');
     } finally {
       setAuthLoading(false);
     }
@@ -339,6 +404,38 @@ export default function App() {
     </header>
   );
 
+  if (page === 'confirm-email') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white px-6">
+        <main className="max-w-md w-full text-center">
+          <p className="text-sm font-medium tracking-wider text-zinc-800">ITUM <span className="text-zinc-400 mx-1">/</span> SPORTS</p>
+          <h1 className="text-3xl font-bold text-zinc-900 mt-10">Check your email</h1>
+          <p className="text-sm text-zinc-600 mt-4">
+            We sent a confirmation link to <strong>{confirmationEmail}</strong>. Confirm your email to finish registration.
+          </p>
+          <p className="text-xs text-zinc-500 mt-3">If you don’t see it, check your spam folder.</p>
+          {confirmationMessage && <p role="status" className="text-sm text-emerald-700 mt-5">{confirmationMessage}</p>}
+          {authError && <p role="alert" className="text-sm text-red-600 mt-5">{authError}</p>}
+          <button
+            type="button"
+            onClick={handleResendConfirmation}
+            disabled={authLoading}
+            className="w-full bg-black text-white rounded-full py-3.5 mt-8 text-sm font-medium hover:bg-zinc-800 transition disabled:opacity-50"
+          >
+            {authLoading ? 'Please wait...' : 'Resend confirmation email'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setAuthError(''); setPage('signin'); }}
+            className="text-sm text-zinc-600 hover:text-black mt-6"
+          >
+            Back to sign in
+          </button>
+        </main>
+      </div>
+    );
+  }
+
   if (page === 'signin' || page === 'signup') {
     const isSignIn = page === 'signin';
     return (
@@ -377,7 +474,7 @@ export default function App() {
                 </>
               )}
 
-              <input type="email" required placeholder="Email address" value={user.email} onChange={e => setUser({ ...user, email: e.target.value })} className="w-full border-b border-zinc-200 py-3 text-sm focus:outline-none focus:border-black" />
+              <input type="email" required placeholder={isSignIn ? 'Email address' : 'studentid@itum.mrt.ac.lk'} value={user.email} onChange={e => setUser({ ...user, email: e.target.value })} className="w-full border-b border-zinc-200 py-3 text-sm focus:outline-none focus:border-black" />
 
               <div className="relative">
                 <input type={showPassword ? 'text' : 'password'} required placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="w-full border-b border-zinc-200 py-3 text-sm focus:outline-none focus:border-black pr-10" />
