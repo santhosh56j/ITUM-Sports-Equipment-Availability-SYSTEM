@@ -7,6 +7,20 @@ import { supabase } from './supabaseClient';
 
 const ITUM_EMAIL_DOMAIN = '@itum.mrt.ac.lk';
 
+const getBookingDates = (startDate = new Date()) => Array.from({ length: 5 }, (_, offset) => {
+  const date = new Date(startDate);
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + offset);
+  const weekday = date.toLocaleDateString('en-US', { weekday: 'short' });
+  const month = date.toLocaleDateString('en-US', { month: 'short' });
+
+  return {
+    day: weekday.toUpperCase(),
+    num: String(date.getDate()),
+    full: `${weekday}, ${date.getDate()} ${month} ${date.getFullYear()}`
+  };
+});
+
 const INITIAL_CATALOG = [
   { id: 1, name: 'Basketball', category: 'Indoor', rating: 4.9, available: 6, code: 'BB · 07', desc: 'Size 7 · Indoor / outdoor · Ready to play', img: '🏀' },
   { id: 2, name: 'Netball', category: 'Outdoor', rating: 4.9, available: 5, code: 'NB · 02', desc: 'Size 5 · Match grade · Ready to play', img: '🏐' },
@@ -42,7 +56,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
   const [selectedItem, setSelectedItem] = useState(INITIAL_CATALOG[0]);
-  const [selectedDate, setSelectedDate] = useState('Fri, 23 Oct 2026');
+  const [selectedDate, setSelectedDate] = useState(() => getBookingDates()[0].full);
   const [selectedSlot, setSelectedSlot] = useState('4:00–6:00 PM');
   const [quantity, setQuantity] = useState(1);
   const [latestBooking, setLatestBooking] = useState(null);
@@ -566,13 +580,7 @@ export default function App() {
   }
 
   if (page === 'reserve') {
-    const dates = [
-      { day: 'THU', num: '22', full: 'Thu, 22 Oct 2026' },
-      { day: 'FRI', num: '23', full: 'Fri, 23 Oct 2026' },
-      { day: 'SAT', num: '24', full: 'Sat, 24 Oct 2026' },
-      { day: 'SUN', num: '25', full: 'Sun, 25 Oct 2026' },
-      { day: 'MON', num: '26', full: 'Mon, 26 Oct 2026' },
-    ];
+    const dates = getBookingDates();
     const slots = [
       { time: '2:00–4:00 PM', status: 'Available' },
       { time: '4:00–6:00 PM', status: 'Available' },
